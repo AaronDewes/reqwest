@@ -21,8 +21,6 @@ use std::time::Duration;
 
 #[cfg(feature = "default-tls")]
 use self::native_tls_conn::NativeTlsConn;
-#[cfg(feature = "__rustls")]
-use self::rustls_tls_conn::RustlsTlsConn;
 use crate::dns::DynResolver;
 use crate::error::BoxError;
 use crate::proxy::{Proxy, ProxyScheme};
@@ -49,12 +47,6 @@ enum Inner {
     Http(HttpConnector),
     #[cfg(feature = "default-tls")]
     DefaultTls(HttpConnector, TlsConnector),
-    #[cfg(feature = "__rustls")]
-    RustlsTls {
-        http: HttpConnector,
-        tls: Arc<rustls::ClientConfig>,
-        tls_proxy: Arc<rustls::ClientConfig>,
-    },
 }
 
 impl Connector {
@@ -148,53 +140,6 @@ impl Connector {
         }
     }
 
-    #[cfg(feature = "__rustls")]
-    pub(crate) fn new_rustls_tls<T>(
-        mut http: HttpConnector,
-        tls: rustls::ClientConfig,
-        proxies: Arc<Vec<Proxy>>,
-        user_agent: Option<HeaderValue>,
-        local_addr: T,
-        #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
-        interface: Option<&str>,
-        nodelay: bool,
-        tls_info: bool,
-    ) -> Connector
-    where
-        T: Into<Option<IpAddr>>,
-    {
-        http.set_local_address(local_addr.into());
-        #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
-        if let Some(interface) = interface {
-            http.set_interface(interface.to_owned());
-        }
-        http.set_nodelay(nodelay);
-        http.enforce_http(false);
-
-        let (tls, tls_proxy) = if proxies.is_empty() {
-            let tls = Arc::new(tls);
-            (tls.clone(), tls)
-        } else {
-            let mut tls_proxy = tls.clone();
-            tls_proxy.alpn_protocols.clear();
-            (Arc::new(tls), Arc::new(tls_proxy))
-        };
-
-        Connector {
-            inner: Inner::RustlsTls {
-                http,
-                tls,
-                tls_proxy,
-            },
-            proxies,
-            verbose: verbose::OFF,
-            timeout: None,
-            nodelay,
-            tls_info,
-            user_agent,
-        }
-    }
-
     pub(crate) fn set_timeout(&mut self, timeout: Option<Duration>) {
         self.timeout = timeout;
     }
@@ -233,31 +178,6 @@ impl Connector {
                         inner: self.verbose.wrap(NativeTlsConn { inner: io }),
                         is_proxy: false,
                         tls_info: self.tls_info,
-                    });
-                }
-            }
-            #[cfg(feature = "__rustls")]
-            Inner::RustlsTls { tls, .. } => {
-                if dst.scheme() == Some(&Scheme::HTTPS) {
-                    use std::convert::TryFrom;
-                    use tokio_rustls::TlsConnector as RustlsConnector;
-
-                    let tls = tls.clone();
-                    let host = dst.host().ok_or("no host in url")?.to_string();
-                    let conn = socks::connect(proxy, dst, dns).await?;
-                    let conn = TokioIo::new(conn);
-                    let conn = TokioIo::new(conn);
-                    let server_name =
-                        rustls_pki_types::ServerName::try_from(host.as_str().to_owned())
-                            .map_err(|_| "Invalid Server Name")?;
-                    let io = RustlsConnector::from(tls)
-                        .connect(server_name, conn)
-                        .await?;
-                    let io = TokioIo::new(io);
-                    return Ok(Conn {
-                        inner: self.verbose.wrap(RustlsTlsConn { inner: io }),
-                        is_proxy: false,
-                        tls_info: false,
                     });
                 }
             }
@@ -311,38 +231,6 @@ impl Connector {
                     }
                     Ok(Conn {
                         inner: self.verbose.wrap(NativeTlsConn { inner: stream }),
-                        is_proxy,
-                        tls_info: self.tls_info,
-                    })
-                } else {
-                    Ok(Conn {
-                        inner: self.verbose.wrap(io),
-                        is_proxy,
-                        tls_info: false,
-                    })
-                }
-            }
-            #[cfg(feature = "__rustls")]
-            Inner::RustlsTls { http, tls, .. } => {
-                let mut http = http.clone();
-
-                // Disable Nagle's algorithm for TLS handshake
-                //
-                // https://www.openssl.org/docs/man1.1.1/man3/SSL_connect.html#NOTES
-                if !self.nodelay && (dst.scheme() == Some(&Scheme::HTTPS)) {
-                    http.set_nodelay(true);
-                }
-
-                let mut http = hyper_rustls::HttpsConnector::from((http, tls.clone()));
-                let io = http.call(dst).await?;
-
-                if let hyper_rustls::MaybeHttpsStream::Https(stream) = io {
-                    if !self.nodelay {
-                        let (io, _) = stream.inner().get_ref();
-                        io.inner().inner().set_nodelay(false)?;
-                    }
-                    Ok(Conn {
-                        inner: self.verbose.wrap(RustlsTlsConn { inner: stream }),
                         is_proxy,
                         tls_info: self.tls_info,
                     })
@@ -408,41 +296,6 @@ impl Connector {
                     });
                 }
             }
-            #[cfg(feature = "__rustls")]
-            Inner::RustlsTls {
-                http,
-                tls,
-                tls_proxy,
-            } => {
-                if dst.scheme() == Some(&Scheme::HTTPS) {
-                    use rustls_pki_types::ServerName;
-                    use std::convert::TryFrom;
-                    use tokio_rustls::TlsConnector as RustlsConnector;
-
-                    let host = dst.host().ok_or("no host in url")?.to_string();
-                    let port = dst.port().map(|r| r.as_u16()).unwrap_or(443);
-                    let http = http.clone();
-                    let mut http = hyper_rustls::HttpsConnector::from((http, tls_proxy.clone()));
-                    let tls = tls.clone();
-                    let conn = http.call(proxy_dst).await?;
-                    log::trace!("tunneling HTTPS over proxy");
-                    let maybe_server_name = ServerName::try_from(host.as_str().to_owned())
-                        .map_err(|_| "Invalid Server Name");
-                    let tunneled = tunnel(conn, host, port, self.user_agent.clone(), auth).await?;
-                    let server_name = maybe_server_name?;
-                    let io = RustlsConnector::from(tls)
-                        .connect(server_name, TokioIo::new(tunneled))
-                        .await?;
-
-                    return Ok(Conn {
-                        inner: self.verbose.wrap(RustlsTlsConn {
-                            inner: TokioIo::new(io),
-                        }),
-                        is_proxy: false,
-                        tls_info: false,
-                    });
-                }
-            }
             #[cfg(not(feature = "__tls"))]
             Inner::Http(_) => (),
         }
@@ -454,8 +307,6 @@ impl Connector {
         match &mut self.inner {
             #[cfg(feature = "default-tls")]
             Inner::DefaultTls(http, _tls) => http.set_keepalive(dur),
-            #[cfg(feature = "__rustls")]
-            Inner::RustlsTls { http, .. } => http.set_keepalive(dur),
             #[cfg(not(feature = "__tls"))]
             Inner::Http(http) => http.set_keepalive(dur),
         }
@@ -570,46 +421,6 @@ impl TlsInfoFactory for hyper_tls::MaybeHttpsStream<TokioIo<tokio::net::TcpStrea
         match self {
             hyper_tls::MaybeHttpsStream::Https(tls) => tls.tls_info(),
             hyper_tls::MaybeHttpsStream::Http(_) => None,
-        }
-    }
-}
-
-#[cfg(feature = "__rustls")]
-impl TlsInfoFactory for tokio_rustls::client::TlsStream<TokioIo<TokioIo<tokio::net::TcpStream>>> {
-    fn tls_info(&self) -> Option<crate::tls::TlsInfo> {
-        let peer_certificate = self
-            .get_ref()
-            .1
-            .peer_certificates()
-            .and_then(|certs| certs.first())
-            .map(|c| c.to_vec());
-        Some(crate::tls::TlsInfo { peer_certificate })
-    }
-}
-
-#[cfg(feature = "__rustls")]
-impl TlsInfoFactory
-    for tokio_rustls::client::TlsStream<
-        TokioIo<hyper_rustls::MaybeHttpsStream<TokioIo<tokio::net::TcpStream>>>,
-    >
-{
-    fn tls_info(&self) -> Option<crate::tls::TlsInfo> {
-        let peer_certificate = self
-            .get_ref()
-            .1
-            .peer_certificates()
-            .and_then(|certs| certs.first())
-            .map(|c| c.to_vec());
-        Some(crate::tls::TlsInfo { peer_certificate })
-    }
-}
-
-#[cfg(feature = "__rustls")]
-impl TlsInfoFactory for hyper_rustls::MaybeHttpsStream<TokioIo<tokio::net::TcpStream>> {
-    fn tls_info(&self) -> Option<crate::tls::TlsInfo> {
-        match self {
-            hyper_rustls::MaybeHttpsStream::Https(tls) => tls.tls_info(),
-            hyper_rustls::MaybeHttpsStream::Http(_) => None,
         }
     }
 }
@@ -913,119 +724,6 @@ mod native_tls_conn {
     }
 }
 
-#[cfg(feature = "__rustls")]
-mod rustls_tls_conn {
-    use super::TlsInfoFactory;
-    use hyper::rt::{Read, ReadBufCursor, Write};
-    use hyper_rustls::MaybeHttpsStream;
-    use hyper_util::client::legacy::connect::{Connected, Connection};
-    use hyper_util::rt::TokioIo;
-    use pin_project_lite::pin_project;
-    use std::{
-        io::{self, IoSlice},
-        pin::Pin,
-        task::{Context, Poll},
-    };
-    use tokio::io::{AsyncRead, AsyncWrite};
-    use tokio::net::TcpStream;
-    use tokio_rustls::client::TlsStream;
-
-    pin_project! {
-        pub(super) struct RustlsTlsConn<T> {
-            #[pin] pub(super) inner: TokioIo<TlsStream<T>>,
-        }
-    }
-
-    impl Connection for RustlsTlsConn<TokioIo<TokioIo<TcpStream>>> {
-        fn connected(&self) -> Connected {
-            if self.inner.inner().get_ref().1.alpn_protocol() == Some(b"h2") {
-                self.inner
-                    .inner()
-                    .get_ref()
-                    .0
-                    .inner()
-                    .connected()
-                    .negotiated_h2()
-            } else {
-                self.inner.inner().get_ref().0.inner().connected()
-            }
-        }
-    }
-    impl Connection for RustlsTlsConn<TokioIo<MaybeHttpsStream<TokioIo<TcpStream>>>> {
-        fn connected(&self) -> Connected {
-            if self.inner.inner().get_ref().1.alpn_protocol() == Some(b"h2") {
-                self.inner
-                    .inner()
-                    .get_ref()
-                    .0
-                    .inner()
-                    .connected()
-                    .negotiated_h2()
-            } else {
-                self.inner.inner().get_ref().0.inner().connected()
-            }
-        }
-    }
-
-    impl<T: AsyncRead + AsyncWrite + Unpin> Read for RustlsTlsConn<T> {
-        fn poll_read(
-            self: Pin<&mut Self>,
-            cx: &mut Context,
-            buf: ReadBufCursor<'_>,
-        ) -> Poll<tokio::io::Result<()>> {
-            let this = self.project();
-            Read::poll_read(this.inner, cx, buf)
-        }
-    }
-
-    impl<T: AsyncRead + AsyncWrite + Unpin> Write for RustlsTlsConn<T> {
-        fn poll_write(
-            self: Pin<&mut Self>,
-            cx: &mut Context,
-            buf: &[u8],
-        ) -> Poll<Result<usize, tokio::io::Error>> {
-            let this = self.project();
-            Write::poll_write(this.inner, cx, buf)
-        }
-
-        fn poll_write_vectored(
-            self: Pin<&mut Self>,
-            cx: &mut Context<'_>,
-            bufs: &[IoSlice<'_>],
-        ) -> Poll<Result<usize, io::Error>> {
-            let this = self.project();
-            Write::poll_write_vectored(this.inner, cx, bufs)
-        }
-
-        fn is_write_vectored(&self) -> bool {
-            self.inner.is_write_vectored()
-        }
-
-        fn poll_flush(
-            self: Pin<&mut Self>,
-            cx: &mut Context,
-        ) -> Poll<Result<(), tokio::io::Error>> {
-            let this = self.project();
-            Write::poll_flush(this.inner, cx)
-        }
-
-        fn poll_shutdown(
-            self: Pin<&mut Self>,
-            cx: &mut Context,
-        ) -> Poll<Result<(), tokio::io::Error>> {
-            let this = self.project();
-            Write::poll_shutdown(this.inner, cx)
-        }
-    }
-    impl<T> TlsInfoFactory for RustlsTlsConn<T>
-    where
-        TokioIo<TlsStream<T>>: TlsInfoFactory,
-    {
-        fn tls_info(&self) -> Option<crate::tls::TlsInfo> {
-            self.inner.tls_info()
-        }
-    }
-}
 
 #[cfg(feature = "socks")]
 mod socks {

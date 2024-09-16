@@ -1,4 +1,4 @@
-#[cfg(any(feature = "native-tls", feature = "__rustls",))]
+#[cfg(feature = "native-tls")]
 use std::any::Any;
 use std::convert::TryInto;
 use std::fmt;
@@ -21,7 +21,7 @@ use crate::dns::Resolve;
 use crate::tls;
 #[cfg(feature = "__tls")]
 use crate::Certificate;
-#[cfg(any(feature = "native-tls", feature = "__rustls"))]
+#[cfg(feature = "native-tls")]
 use crate::Identity;
 use crate::{async_impl, header, redirect, IntoUrl, Method, Proxy};
 
@@ -500,14 +500,6 @@ impl ClientBuilder {
         self.with_inner(|inner| inner.http2_max_frame_size(sz))
     }
 
-    /// This requires the optional `http3` feature to be
-    /// enabled.
-    #[cfg(feature = "http3")]
-    #[cfg_attr(docsrs, doc(cfg(feature = "http3")))]
-    pub fn http3_prior_knowledge(self) -> ClientBuilder {
-        self.with_inner(|inner| inner.http3_prior_knowledge())
-    }
-
     // TCP options
 
     /// Set whether sockets have `TCP_NODELAY` enabled.
@@ -651,7 +643,7 @@ impl ClientBuilder {
     ///
     /// This requires the optional `native-tls` or `rustls-tls(-...)` feature to be
     /// enabled.
-    #[cfg(any(feature = "native-tls", feature = "__rustls"))]
+    #[cfg(feature = "native-tls")]
     #[cfg_attr(docsrs, doc(cfg(any(feature = "native-tls", feature = "rustls-tls"))))]
     pub fn identity(self, identity: Identity) -> ClientBuilder {
         self.with_inner(move |inner| inner.identity(identity))
@@ -795,20 +787,6 @@ impl ClientBuilder {
         self.with_inner(move |inner| inner.use_native_tls())
     }
 
-    /// Force using the Rustls TLS backend.
-    ///
-    /// Since multiple TLS backends can be optionally enabled, this option will
-    /// force the `rustls` backend to be used for this `Client`.
-    ///
-    /// # Optional
-    ///
-    /// This requires the optional `rustls-tls(-...)` feature to be enabled.
-    #[cfg(feature = "__rustls")]
-    #[cfg_attr(docsrs, doc(cfg(feature = "rustls-tls")))]
-    pub fn use_rustls_tls(self) -> ClientBuilder {
-        self.with_inner(move |inner| inner.use_rustls_tls())
-    }
-
     /// Add TLS information as `TlsInfo` extension to responses.
     ///
     /// # Optional
@@ -846,7 +824,7 @@ impl ClientBuilder {
     ///
     /// This requires one of the optional features `native-tls` or
     /// `rustls-tls(-...)` to be enabled.
-    #[cfg(any(feature = "native-tls", feature = "__rustls",))]
+    #[cfg(feature = "native-tls")]
     #[cfg_attr(docsrs, doc(cfg(any(feature = "native-tls", feature = "rustls-tls"))))]
     pub fn use_preconfigured_tls(self, tls: impl Any) -> ClientBuilder {
         self.with_inner(move |inner| inner.use_preconfigured_tls(tls))

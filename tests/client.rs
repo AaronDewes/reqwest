@@ -84,35 +84,6 @@ async fn donot_set_content_length_0_if_have_no_body() {
     assert_eq!(res.status(), reqwest::StatusCode::OK);
 }
 
-#[cfg(feature = "http3")]
-#[tokio::test]
-async fn http3_request_full() {
-    use http_body_util::BodyExt;
-
-    let server = server::http3(move |req| async move {
-        assert_eq!(req.headers()[CONTENT_LENGTH], "5");
-        let reqb = req.collect().await.unwrap().to_bytes();
-        assert_eq!(reqb, "hello");
-        http::Response::default()
-    });
-
-    let url = format!("https://{}/content-length", server.addr());
-    let res = reqwest::Client::builder()
-        .http3_prior_knowledge()
-        .danger_accept_invalid_certs(true)
-        .build()
-        .expect("client builder")
-        .post(url)
-        .version(http::Version::HTTP_3)
-        .body("hello")
-        .send()
-        .await
-        .expect("request");
-
-    assert_eq!(res.version(), http::Version::HTTP_3);
-    assert_eq!(res.status(), reqwest::StatusCode::OK);
-}
-
 #[tokio::test]
 async fn user_agent() {
     let server = server::http(move |req| async move {
@@ -353,7 +324,7 @@ async fn overridden_dns_resolution_with_hickory_dns_multiple() {
     assert_eq!("Hello", text);
 }
 
-#[cfg(any(feature = "native-tls", feature = "__rustls",))]
+#[cfg(feature = "native-tls")]
 #[test]
 fn use_preconfigured_tls_with_bogus_backend() {
     struct DefinitelyNotTls;
@@ -379,45 +350,7 @@ fn use_preconfigured_native_tls_default() {
         .expect("preconfigured default tls");
 }
 
-#[cfg(feature = "__rustls")]
-#[test]
-fn use_preconfigured_rustls_default() {
-    extern crate rustls;
-
-    let root_cert_store = rustls::RootCertStore::empty();
-    let tls = rustls::ClientConfig::builder()
-        .with_root_certificates(root_cert_store)
-        .with_no_client_auth();
-
-    reqwest::Client::builder()
-        .use_preconfigured_tls(tls)
-        .build()
-        .expect("preconfigured rustls tls");
-}
-
-#[cfg(feature = "__rustls")]
-#[tokio::test]
-#[ignore = "Needs TLS support in the test server"]
-async fn http2_upgrade() {
-    let server = server::http(move |_| async move { http::Response::default() });
-
-    let url = format!("https://localhost:{}", server.addr().port());
-    let res = reqwest::Client::builder()
-        .danger_accept_invalid_certs(true)
-        .use_rustls_tls()
-        .build()
-        .expect("client builder")
-        .get(&url)
-        .send()
-        .await
-        .expect("request");
-
-    assert_eq!(res.status(), reqwest::StatusCode::OK);
-    assert_eq!(res.version(), reqwest::Version::HTTP_2);
-}
-
 #[cfg(feature = "default-tls")]
-#[cfg_attr(feature = "http3", ignore = "enabling http3 seems to break this, why?")]
 #[tokio::test]
 async fn test_allowed_methods() {
     let resp = reqwest::Client::builder()
