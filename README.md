@@ -1,3 +1,7 @@
+This is a fork of reqwest that removes all rustls support to fix some dep issues I was having.
+
+---
+
 # reqwest
 
 [![crates.io](https://img.shields.io/crates/v/reqwest.svg)](https://crates.io/crates/reqwest)
